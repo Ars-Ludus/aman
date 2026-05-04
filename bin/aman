@@ -5,8 +5,6 @@
 # Description: Manage shell and PATH aliases with conflict detection
 #
 
-set -eo pipefail
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -451,31 +449,89 @@ interactive_menu() {
         echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
         echo "  1) List all aliases"
         echo "  2) Create a new alias"
-        echo "  3) Remove an alias"
-        echo "  4) Export aliases"
-        echo "  5) Import aliases"
-        echo "  6) Show help"
-        echo "  7) Exit"
+        echo "  3) Edit an existing alias"
+        echo "  4) Remove an alias"
+        echo "  5) Export aliases"
+        echo "  6) Import aliases"
+        echo "  7) Show help"
+        echo "  8) Exit"
         echo ""
-        read -p "Choice (1-7): " menu_choice
+        read -p "Choice (1-8): " menu_choice
         
         case $menu_choice in
             1) list_aliases ;;
             2) create_alias_interactive ;;
-            3) 
+            3) edit_alias ;;
+            4) 
                 read -p "Alias name to remove: " remove_name
                 remove_alias "$remove_name"
                 ;;
-            4) export_aliases ;;
-            5)
+            5) export_aliases ;;
+            6)
                 read -p "Import file path: " import_file
                 import_aliases "$import_file"
                 ;;
-            6) show_help ;;
-            7) echo -e "${GREEN}Goodbye!${NC}"; break ;;
+            7) show_help ;;
+            8) echo -e "${GREEN}Goodbye!${NC}"; break ;;
             *) echo -e "${RED}Invalid choice${NC}" ;;
         esac
     done
+}
+
+# Edit an existing alias (recreate with new command)
+edit_alias() {
+    local alias_name="${1:-}"
+    
+    if [ -z "$alias_name" ]; then
+        read -p "Alias name to edit: " alias_name
+    fi
+    
+    if [ -z "$alias_name" ]; then
+        echo -e "${RED}❌ Alias name required${NC}"
+        return 1
+    fi
+    
+    # Check if alias exists
+    local exists=false
+    local alias_type=""
+    local old_value=""
+    
+    if grep -q "^alias $alias_name=" "$AMAN_ALIASES" 2>/dev/null; then
+        exists=true
+        alias_type="shell"
+        old_value=$(grep "^alias $alias_name=" "$AMAN_ALIASES" 2>/dev/null | sed "s/^alias $alias_name='//;s/'$//")
+    elif [ -f "$AMAN_BIN/$alias_name" ]; then
+        exists=true
+        alias_type="path"
+        old_value=$(head -n 3 "$AMAN_BIN/$alias_name" 2>/dev/null | grep "exec" | sed 's/exec //' | sed 's/ "\$@//')
+    fi
+    
+    if [ "$exists" = false ]; then
+        echo -e "${RED}❌ Alias '$alias_name' not found${NC}"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Editing $alias_type alias: $alias_name${NC}"
+    echo -e "${YELLOW}Current value: ${old_value:-unknown}${NC}"
+    
+    read -p "New command: " new_command
+    
+    if [ -z "$new_command" ]; then
+        echo -e "${RED}❌ Command cannot be empty${NC}"
+        return 1
+    fi
+    
+    # Remove old, create new
+    echo -e "${YELLOW}Updating...${NC}"
+    remove_alias "$alias_name" >/dev/null 2>&1
+    
+    if [ "$alias_type" = "path" ]; then
+        create_path_alias "$alias_name" "$new_command"
+    else
+        create_shell_alias "$alias_name" "$new_command"
+    fi
+    
+    echo -e "${GREEN}✅ Alias updated: $alias_name -> $new_command${NC}"
 }
 
 # Show help
@@ -489,6 +545,7 @@ ${CYAN}USAGE:${NC}
 ${CYAN}COMMANDS:${NC}
     ls, list                 List all aliases
     add, create, mk          Create a new alias (interactive)
+    edit, change, update     Modify an existing alias
     rm, remove <name>        Remove an alias
     export [path]            Export aliases to JSON file
     import <file>            Import aliases from JSON file
@@ -554,7 +611,7 @@ main() {
     first_run_wizard
     
     # Acquire lock for write operations
-    local write_commands="add create mk rm remove import"
+    local write_commands="add create mk rm remove import edit"
     if [[ $write_commands =~ (^|[[:space:]])${1:-}($|[[:space:]]) ]]; then
         acquire_lock
     fi
@@ -567,6 +624,9 @@ main() {
             ;;
         add|create|mk)
             create_alias_interactive
+            ;;
+        edit|change|update)
+            edit_alias "${2:-}"
             ;;
         rm|remove)
             if [ -z "${2:-}" ]; then

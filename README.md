@@ -29,6 +29,7 @@ aman <command> [options]
 ### Commands:
 - `ls`, `list`: List all managed aliases.
 - `add`, `create`, `mk`: Create a new alias (interactive).
+- `edit`, `change`, `update`: Modify an existing alias.
 - `rm`, `remove <name>`: Remove an alias.
 - `export [path]`: Export aliases to a JSON file.
 - `import <file>`: Import aliases from a JSON file.
