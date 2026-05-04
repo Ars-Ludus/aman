@@ -1,0 +1,614 @@
+#!/bin/bash
+#
+# aman - Alias Manager
+# Version: 1.0.1
+# Description: Manage shell and PATH aliases with conflict detection
+#
+
+set -eo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Configuration
+AMAN_HOME="$HOME/.aman"
+AMAN_CONFIG="$AMAN_HOME/config.json"
+AMAN_ALIASES="$AMAN_HOME/aliases.sh"
+AMAN_BIN="$AMAN_HOME/bin"
+AMAN_BACKUPS="$AMAN_HOME/backups"
+AMAN_LOCK="$AMAN_HOME/aman.lock"
+AMAN_VERSION="1.0.1"
+
+# Detect the actual shell the user is running
+detect_current_shell() {
+    local shell_path="${SHELL:-}"
+    local shell_name=$(basename "$shell_path")
+    
+    # Also check parent process (in case script was called from different shell)
+    local parent_shell=$(ps -o comm= -p $PPID 2>/dev/null | xargs basename 2>/dev/null)
+    
+    if [[ "$shell_name" == "zsh" ]] || [[ "$parent_shell" == "zsh" ]]; then
+        echo "zsh"
+    elif [[ "$shell_name" == "bash" ]] || [[ "$parent_shell" == "bash" ]]; then
+        echo "bash"
+    else
+        # Default to bash
+        echo "bash"
+    fi
+}
+
+# Detect shell config file based on actual shell
+detect_rc_file() {
+    local current_shell=$(detect_current_shell)
+    
+    case "$current_shell" in
+        zsh)
+            echo "$HOME/.zshrc"
+            ;;
+        bash)
+            echo "$HOME/.bashrc"
+            ;;
+        *)
+            echo "$HOME/.bashrc"
+            ;;
+    esac
+}
+
+RC_FILE=$(detect_rc_file)
+CURRENT_SHELL=$(detect_current_shell)
+
+# Initialize aman environment
+init_aman() {
+    mkdir -p "$AMAN_HOME" "$AMAN_BIN" "$AMAN_BACKUPS"
+    
+    # Create initial config if not exists
+    if [ ! -f "$AMAN_CONFIG" ]; then
+        cat > "$AMAN_CONFIG" <<EOF
+{
+  "version": "$AMAN_VERSION",
+  "shell_config": "$RC_FILE",
+  "shell_type": "$CURRENT_SHELL",
+  "aliases": {}
+}
+EOF
+    fi
+    
+    # Create aliases.sh if not exists
+    if [ ! -f "$AMAN_ALIASES" ]; then
+        cat > "$AMAN_ALIASES" <<EOF
+#!/bin/$CURRENT_SHELL
+# aman-managed aliases - Generated on $(date)
+# Do not edit manually - use 'aman' command
+
+EOF
+    fi
+    
+    # Ensure PATH includes ~/.aman/bin
+    if [ -f "$RC_FILE" ]; then
+        # Check if PATH addition exists
+        if ! grep -q "export PATH=\"\$HOME/.aman/bin:\$PATH\"" "$RC_FILE" 2>/dev/null; then
+            echo "" >> "$RC_FILE"
+            echo "# Add aman bin directory to PATH" >> "$RC_FILE"
+            
+            # Different syntax for different shells
+            if [[ "$CURRENT_SHELL" == "zsh" ]]; then
+                echo "export PATH=\"\$HOME/.aman/bin:\$PATH\"" >> "$RC_FILE"
+            else
+                echo "export PATH=\"\$HOME/.aman/bin:\$PATH\"" >> "$RC_FILE"
+            fi
+            
+            echo -e "${YELLOW}📌 Added ~/.aman/bin to PATH in $RC_FILE${NC}"
+        fi
+        
+        # Source aliases.sh in rc file if not already present
+        if ! grep -q "source ~/.aman/aliases.sh" "$RC_FILE" 2>/dev/null; then
+            echo "" >> "$RC_FILE"
+            echo "# Source aman aliases" >> "$RC_FILE"
+            echo "source ~/.aman/aliases.sh" >> "$RC_FILE"
+            echo -e "${YELLOW}📌 Added source for ~/.aman/aliases.sh to $RC_FILE${NC}"
+        fi
+    fi
+}
+
+# First run wizard
+first_run_wizard() {
+    if [ ! -f "$AMAN_HOME/.initialized" ]; then
+        echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║       Welcome to aman v$AMAN_VERSION       ║${NC}"
+        echo -e "${GREEN}║         Alias Manager for Linux          ║${NC}"
+        echo -e "${GREEN}╚════════════════════════════════════════╝${NC}\n"
+        
+        echo -e "${CYAN}Detected shell: $CURRENT_SHELL${NC}"
+        echo -e "${CYAN}Will use config file: $RC_FILE${NC}\n"
+        
+        touch "$AMAN_HOME/.initialized"
+        echo -e "${GREEN}✓ aman initialized!${NC}\n"
+    fi
+}
+
+# File locking
+acquire_lock() {
+    exec 200>"$AMAN_LOCK"
+    if ! flock -n 200; then
+        echo -e "${YELLOW}Another aman process is running. Waiting...${NC}"
+        flock 200
+    fi
+}
+
+release_lock() {
+    flock -u 200 2>/dev/null || true
+}
+
+# Backup config
+backup_config() {
+    local backup_file="$AMAN_BACKUPS/aliases_$(date +%Y%m%d_%H%M%S).sh"
+    cp "$AMAN_ALIASES" "$backup_file"
+    echo -e "${GREEN}✓ Backup created: $backup_file${NC}"
+}
+
+# Check for conflicts
+check_conflicts() {
+    local alias_name=$1
+    local alias_type=$2
+    
+    # Check existing aman aliases
+    if grep -q "^alias $alias_name=" "$AMAN_ALIASES" 2>/dev/null; then
+        echo -e "${RED}❌ $alias_name is already an aman-managed shell alias${NC}"
+        return 1
+    fi
+    
+    # Check PATH binaries
+    if command -v "$alias_name" &>/dev/null; then
+        local existing_path=$(command -v "$alias_name")
+        echo -e "${RED}❌ $alias_name is already a command: $existing_path${NC}"
+        return 1
+    fi
+    
+    # Check if path alias symlink exists
+    if [ -L "$AMAN_BIN/$alias_name" ]; then
+        echo -e "${RED}❌ $alias_name is already an aman-managed PATH alias${NC}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Create shell alias
+create_shell_alias() {
+    local alias_name=$1
+    local alias_command=$2
+    
+    # Escape single quotes in command
+    local escaped_command=$(echo "$alias_command" | sed "s/'/'\\\\''/g")
+    
+    # Add to aliases.sh
+    echo "alias $alias_name='$escaped_command'" >> "$AMAN_ALIASES"
+    
+    # Update JSON config
+    local temp_file=$(mktemp)
+    jq --arg name "$alias_name" \
+       --arg type "shell" \
+       --arg value "$alias_command" \
+       --arg date "$(date -Iseconds)" \
+       '.aliases[$name] = {"type": $type, "value": $value, "created": $date}' \
+       "$AMAN_CONFIG" > "$temp_file" 2>/dev/null || {
+           echo -e "${RED}❌ Failed to update config. Is jq installed?${NC}"
+           return 1
+       }
+    mv "$temp_file" "$AMAN_CONFIG"
+    
+    echo -e "${GREEN}✓ Shell alias created: $alias_name='$alias_command'${NC}"
+}
+
+# Create PATH alias
+create_path_alias() {
+    local alias_name=$1
+    local target_command=$2
+    
+    # Find full path of target command
+    local full_path=$(command -v "$target_command" 2>/dev/null || echo "")
+    
+    if [ -z "$full_path" ]; then
+        echo -e "${YELLOW}⚠️  '$target_command' not found in PATH. Creating wrapper script anyway.${NC}"
+        full_path="$target_command"
+    fi
+    
+    # Create wrapper script
+    cat > "$AMAN_BIN/$alias_name" <<EOF
+#!/bin/bash
+# aman PATH alias for: $alias_name -> $target_command
+exec $full_path "\$@"
+EOF
+    
+    chmod +x "$AMAN_BIN/$alias_name"
+    
+    # Update JSON config
+    local temp_file=$(mktemp)
+    jq --arg name "$alias_name" \
+       --arg type "path" \
+       --arg value "$target_command" \
+       --arg path "$full_path" \
+       --arg date "$(date -Iseconds)" \
+       '.aliases[$name] = {"type": $type, "value": $value, "resolved_path": $path, "created": $date}' \
+       "$AMAN_CONFIG" > "$temp_file" 2>/dev/null
+    mv "$temp_file" "$AMAN_CONFIG"
+    
+    echo -e "${GREEN}✓ PATH alias created: $alias_name -> $full_path${NC}"
+}
+
+# List aliases
+list_aliases() {
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    aman Aliases                         ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════╝${NC}\n"
+    
+    local shell_count=$(grep -c "^alias " "$AMAN_ALIASES" 2>/dev/null || echo "0")
+    local path_count=$(ls -1 "$AMAN_BIN" 2>/dev/null | wc -l)
+    
+    if [ "$shell_count" -eq 0 ] && [ "$path_count" -eq 0 ]; then
+        echo -e "${YELLOW}No aliases found. Create your first alias with: aman add${NC}"
+        return
+    fi
+    
+    # Shell aliases
+    echo -e "${GREEN}Shell Aliases:${NC}"
+    grep "^alias " "$AMAN_ALIASES" 2>/dev/null | while read -r line; do
+        if [[ $line =~ ^alias\ ([^=]+)=\'(.*)\'$ ]]; then
+            printf "  ${CYAN}%-20s${NC} → %s\n" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        fi
+    done
+    
+    # PATH aliases
+    if [ "$path_count" -gt 0 ]; then
+        echo -e "\n${GREEN}PATH Aliases:${NC}"
+        for alias_file in "$AMAN_BIN"/*; do
+            if [ -f "$alias_file" ] && [ -x "$alias_file" ]; then
+                local name=$(basename "$alias_file")
+                local target=$(head -n 3 "$alias_file" | grep "exec" | sed 's/exec //' | sed 's/ "$@//')
+                printf "  ${CYAN}%-20s${NC} → %s\n" "$name" "${target:-unknown}"
+            fi
+        done
+    fi
+    
+    echo -e "\n${YELLOW}Total: $shell_count shell + $path_count PATH aliases${NC}"
+}
+
+# Remove alias
+remove_alias() {
+    local alias_name=$1
+    
+    # Check if it's a shell alias
+    if grep -q "^alias $alias_name=" "$AMAN_ALIASES" 2>/dev/null; then
+        backup_config
+        # Remove from aliases.sh
+        sed -i.bak "/^alias $alias_name=/d" "$AMAN_ALIASES"
+        # Remove from JSON
+        local temp_file=$(mktemp)
+        jq --arg name "$alias_name" 'del(.aliases[$name])' "$AMAN_CONFIG" > "$temp_file" 2>/dev/null
+        mv "$temp_file" "$AMAN_CONFIG"
+        echo -e "${GREEN}✓ Removed shell alias: $alias_name${NC}"
+        
+    # Check if it's a PATH alias
+    elif [ -f "$AMAN_BIN/$alias_name" ]; then
+        backup_config
+        rm -f "$AMAN_BIN/$alias_name"
+        # Remove from JSON
+        local temp_file=$(mktemp)
+        jq --arg name "$alias_name" 'del(.aliases[$name])' "$AMAN_CONFIG" > "$temp_file" 2>/dev/null
+        mv "$temp_file" "$AMAN_CONFIG"
+        echo -e "${GREEN}✓ Removed PATH alias: $alias_name${NC}"
+        
+    else
+        echo -e "${RED}❌ Alias '$alias_name' not found${NC}"
+        return 1
+    fi
+}
+
+# Interactive alias creation
+create_alias_interactive() {
+    echo -e "${CYAN}Create a new alias${NC}\n"
+    
+    # Get alias name
+    while true; do
+        read -p "Alias name (e.g., k, gs, dps): " alias_name
+        if [[ -z "$alias_name" ]]; then
+            echo -e "${RED}Alias name cannot be empty${NC}"
+            continue
+        fi
+        if [[ ! "$alias_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            echo -e "${RED}Alias name can only contain letters, numbers, hyphens, and underscores${NC}"
+            continue
+        fi
+        break
+    done
+    
+    # Get alias type
+    echo -e "\n${YELLOW}Alias type:${NC}"
+    echo "  1) Shell alias (runs in current shell, can use variables/pipes)"
+    echo "  2) PATH alias (creates executable script, works in all programs)"
+    read -p "Choice (1-2): " type_choice
+    
+    # Get command
+    echo -e "\n${YELLOW}Enter the command this alias should run:${NC}"
+    echo "   Example: 'kubectl' or 'docker ps --format \"table {{.Names}}\"'"
+    read -p "Command: " alias_command
+    
+    if [ -z "$alias_command" ]; then
+        echo -e "${RED}Command cannot be empty${NC}"
+        return 1
+    fi
+    
+    # Check conflicts
+    if ! check_conflicts "$alias_name" "$type_choice"; then
+        return 1
+    fi
+    
+    # Create alias
+    case $type_choice in
+        2)
+            create_path_alias "$alias_name" "$alias_command"
+            ;;
+        *)
+            create_shell_alias "$alias_name" "$alias_command"
+            ;;
+    esac
+    
+    echo -e "\n${GREEN}✅ Alias created successfully!${NC}"
+    echo -e "${YELLOW}📌 Run 'source $RC_FILE' or open a new terminal to use it.${NC}"
+}
+
+# Export aliases
+export_aliases() {
+    local output_path="${1:-$AMAN_HOME/export_$(date +%Y%m%d_%H%M%S).json}"
+    
+    # Check if jq is available
+    if ! command -v jq &>/dev/null; then
+        echo -e "${RED}❌ 'jq' is required for export/import. Install it first:${NC}"
+        echo "   Ubuntu/Debian: sudo apt install jq"
+        echo "   RHEL/Fedora: sudo dnf install jq"
+        echo "   Arch: sudo pacman -S jq"
+        return 1
+    fi
+    
+    # Create export with metadata
+    jq --arg version "$AMAN_VERSION" \
+       --arg date "$(date -Iseconds)" \
+       --arg host "$(hostname)" \
+       --arg user "$USER" \
+       '{
+           export_version: $version,
+           export_date: $date,
+           source_host: $host,
+           source_user: $user,
+           aliases: .aliases
+       }' "$AMAN_CONFIG" > "$output_path"
+    
+    local alias_count=$(jq '.aliases | length' "$AMAN_CONFIG")
+    echo -e "${GREEN}✓ Exported $alias_count aliases to: $output_path${NC}"
+}
+
+# Import aliases
+import_aliases() {
+    local import_file=$1
+    
+    if [ ! -f "$import_file" ]; then
+        echo -e "${RED}❌ File not found: $import_file${NC}"
+        return 1
+    fi
+    
+    # Check if jq is available
+    if ! command -v jq &>/dev/null; then
+        echo -e "${RED}❌ 'jq' is required for export/import. Install it first:${NC}"
+        echo "   Ubuntu/Debian: sudo apt install jq"
+        echo "   RHEL/Fedora: sudo dnf install jq"
+        echo "   Arch: sudo pacman -S jq"
+        return 1
+    fi
+    
+    # Validate import file
+    if ! jq -e '.aliases' "$import_file" >/dev/null 2>&1; then
+        echo -e "${RED}❌ Invalid aman export file${NC}"
+        return 1
+    fi
+    
+    local alias_count=$(jq '.aliases | length' "$import_file")
+    echo -e "${YELLOW}Found $alias_count aliases to import${NC}"
+    
+    backup_config
+    
+    # Import each alias
+    local success=0
+    local failed=0
+    
+    while IFS='|' read -r name type value; do
+        if check_conflicts "$name" "$type" 2>/dev/null; then
+            if [ "$type" = "path" ]; then
+                create_path_alias "$name" "$value" 2>/dev/null
+            else
+                create_shell_alias "$name" "$value" 2>/dev/null
+            fi
+            echo -e "${GREEN}  ✓ Imported: $name${NC}"
+            ((success++))
+        else
+            echo -e "${RED}  ✗ Skipped: $name (conflict)${NC}"
+            ((failed++))
+        fi
+    done < <(jq -r '.aliases | to_entries[] | "\(.key)|\(.value.type)|\(.value.value)"' "$import_file")
+    
+    echo -e "\n${GREEN}✓ Import complete: $success imported, $failed skipped${NC}"
+}
+
+# Interactive menu
+interactive_menu() {
+    while true; do
+        echo -e "\n${CYAN}╔════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║           aman Interactive Menu        ║${NC}"
+        echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
+        echo "  1) List all aliases"
+        echo "  2) Create a new alias"
+        echo "  3) Remove an alias"
+        echo "  4) Export aliases"
+        echo "  5) Import aliases"
+        echo "  6) Show help"
+        echo "  7) Exit"
+        echo ""
+        read -p "Choice (1-7): " menu_choice
+        
+        case $menu_choice in
+            1) list_aliases ;;
+            2) create_alias_interactive ;;
+            3) 
+                read -p "Alias name to remove: " remove_name
+                remove_alias "$remove_name"
+                ;;
+            4) export_aliases ;;
+            5)
+                read -p "Import file path: " import_file
+                import_aliases "$import_file"
+                ;;
+            6) show_help ;;
+            7) echo -e "${GREEN}Goodbye!${NC}"; break ;;
+            *) echo -e "${RED}Invalid choice${NC}" ;;
+        esac
+    done
+}
+
+# Show help
+show_help() {
+    cat <<EOF
+${GREEN}aman v$AMAN_VERSION - Alias Manager for Linux${NC}
+
+${CYAN}USAGE:${NC}
+    aman <command> [options]
+
+${CYAN}COMMANDS:${NC}
+    ls, list                 List all aliases
+    add, create, mk          Create a new alias (interactive)
+    rm, remove <name>        Remove an alias
+    export [path]            Export aliases to JSON file
+    import <file>            Import aliases from JSON file
+    menu                     Open interactive menu
+    help, --help             Show this help
+
+${CYAN}EXAMPLES:${NC}
+    aman ls                          # List all aliases
+    aman add                         # Interactive alias creation
+    aman rm pg                       # Remove 'pg' alias
+    aman export ~/backup.json        # Export to file
+    aman import ~/aliases.json       # Import from file
+    aman menu                        # Open menu interface
+
+${CYAN}ALIAS TYPES:${NC}
+    shell    - Bash/zsh aliases (can use pipes, variables, redirections)
+    path     - Executable scripts in ~/.aman/bin (work in all programs)
+
+${CYAN}CONFIGURATION:${NC}
+    Config:      $AMAN_CONFIG
+    Aliases:     $AMAN_ALIASES
+    PATH bin:    $AMAN_BIN
+    Backups:     $AMAN_BACKUPS
+
+${CYAN}UNINSTALL:${NC}
+    rm -rf ~/.aman
+    # Then remove from $RC_FILE:
+    #   - export PATH="\$HOME/.aman/bin:\$PATH"
+    #   - source ~/.aman/aliases.sh
+
+EOF
+}
+
+# Self-installation
+self_install() {
+    local install_path="${1:-/usr/local/bin/aman}"
+    
+    echo -e "${GREEN}Installing aman to $install_path${NC}"
+    
+    # Check if we have write permission
+    if [ -w "$(dirname "$install_path")" ]; then
+        cp "$0" "$install_path"
+    else
+        sudo cp "$0" "$install_path"
+    fi
+    
+    sudo chmod +x "$install_path"
+    
+    echo -e "${GREEN}✓ aman installed successfully${NC}"
+    echo "Run 'aman help' to get started"
+    exit 0
+}
+
+# Main command handler
+main() {
+    # Handle self-installation
+    if [[ "${1:-}" == "--install" ]]; then
+        self_install "${2:-}"
+    fi
+    
+    # Initialize on first run
+    init_aman
+    first_run_wizard
+    
+    # Acquire lock for write operations
+    local write_commands="add create mk rm remove import"
+    if [[ $write_commands =~ (^|[[:space:]])${1:-}($|[[:space:]]) ]]; then
+        acquire_lock
+    fi
+    
+    local command="${1:-help}"
+    
+    case $command in
+        ls|list)
+            list_aliases
+            ;;
+        add|create|mk)
+            create_alias_interactive
+            ;;
+        rm|remove)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}❌ Please specify an alias name to remove${NC}"
+                echo "Usage: aman rm <alias_name>"
+                exit 1
+            fi
+            remove_alias "$2"
+            ;;
+        export)
+            export_aliases "${2:-}"
+            ;;
+        import)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}❌ Please specify an import file${NC}"
+                echo "Usage: aman import <filename>"
+                exit 1
+            fi
+            import_aliases "$2"
+            ;;
+        menu)
+            interactive_menu
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        --install)
+            # Already handled above
+            ;;
+        *)
+            echo -e "${RED}❌ Unknown command: $command${NC}"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+    
+    # Release lock if acquired
+    if [[ $write_commands =~ (^|[[:space:]])$command($|[[:space:]]) ]]; then
+        release_lock
+    fi
+}
+
+# Run main with all arguments
+main "$@"
