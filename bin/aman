@@ -60,6 +60,24 @@ detect_rc_file() {
 RC_FILE=$(detect_rc_file)
 CURRENT_SHELL=$(detect_current_shell)
 
+# Detect the default system editor
+detect_default_editor() {
+    # Prefer VISUAL (terminal-aware), then EDITOR, then common editors
+    if [ -n "${VISUAL:-}" ] && command -v "${VISUAL%% *}" >/dev/null 2>&1; then
+        echo "$VISUAL"
+    elif [ -n "${EDITOR:-}" ] && command -v "${EDITOR%% *}" >/dev/null 2>&1; then
+        echo "$EDITOR"
+    elif command -v vim >/dev/null 2>&1; then
+        echo "vim"
+    elif command -v nano >/dev/null 2>&1; then
+        echo "nano"
+    else
+        echo "vi"
+    fi
+}
+
+DEFAULT_EDITOR=$(detect_default_editor)
+
 # Initialize aman environment
 init_aman() {
     mkdir -p "$AMAN_HOME" "$AMAN_BIN" "$AMAN_BACKUPS"
@@ -207,36 +225,76 @@ create_shell_alias() {
 create_path_alias() {
     local alias_name=$1
     local target_command=$2
+    local use_editor=${3:-false}
     
-    # Find full path of target command
-    local full_path=$(command -v "$target_command" 2>/dev/null || echo "")
-    
-    if [ -z "$full_path" ]; then
-        echo -e "${YELLOW}⚠️  '$target_command' not found in PATH. Creating wrapper script anyway.${NC}"
-        full_path="$target_command"
-    fi
-    
-    # Create wrapper script
-    cat > "$AMAN_BIN/$alias_name" <<EOF
+    if [ "$use_editor" = true ]; then
+        # Open editor with a template for a full script
+        local tmpfile=$(mktemp)
+        cat > "$tmpfile" <<'EDITEOF'
+#!/bin/bash
+# aman PATH alias for: <alias_name>
+# Edit this script as needed. Save and exit to create the alias.
+# The script will be made executable and placed in ~/.aman/bin/
+
+# Default: exec a command with all arguments
+# Replace this with whatever you need
+EDITEOF
+        sed -i "s/<alias_name>/$alias_name/g" "$tmpfile"
+        ${DEFAULT_EDITOR} "$tmpfile" < /dev/tty
+        
+        if [ ! -s "$tmpfile" ]; then
+            echo -e "${RED}❌ Empty script — alias not created${NC}"
+            rm -f "$tmpfile"
+            return 1
+        fi
+        
+        cp "$tmpfile" "$AMAN_BIN/$alias_name"
+        chmod +x "$AMAN_BIN/$alias_name"
+        rm -f "$tmpfile"
+        
+        # Extract target for config
+        local target_command=$(head -n 10 "$AMAN_BIN/$alias_name" 2>/dev/null | grep "^exec " | sed 's/^exec //' | sed 's/ "\$@//' 2>/dev/null || echo "custom script")
+        
+        echo -e "${GREEN}✓ PATH alias created from editor: $alias_name${NC}"
+    else
+        # Find full path of target command
+        local full_path=$(command -v "$target_command" 2>/dev/null || echo "")
+        
+        if [ -z "$full_path" ]; then
+            echo -e "${YELLOW}⚠️  '$target_command' not found in PATH. Creating wrapper script anyway.${NC}"
+            full_path="$target_command"
+        fi
+        
+        # Create wrapper script
+        cat > "$AMAN_BIN/$alias_name" <<WRAPEOF
 #!/bin/bash
 # aman PATH alias for: $alias_name -> $target_command
 exec $full_path "\$@"
-EOF
-    
-    chmod +x "$AMAN_BIN/$alias_name"
+WRAPEOF
+        chmod +x "$AMAN_BIN/$alias_name"
+        echo -e "${GREEN}✓ PATH alias created: $alias_name -> $full_path${NC}"
+    fi
     
     # Update JSON config
     local temp_file=$(mktemp)
+    local alias_value="${target_command:-custom script}"
     jq --arg name "$alias_name" \
        --arg type "path" \
-       --arg value "$target_command" \
-       --arg path "$full_path" \
+       --arg value "$alias_value" \
+       --arg path "${full_path:-$alias_value}" \
        --arg date "$(date -Iseconds)" \
        '.aliases[$name] = {"type": $type, "value": $value, "resolved_path": $path, "created": $date}' \
-       "$AMAN_CONFIG" > "$temp_file" 2>/dev/null
+       "$AMAN_CONFIG" > "$temp_file" 2>/dev/null || {
+           echo -e "${RED}❌ Failed to update config. Is jq installed?${NC}"
+           return 1
+       }
     mv "$temp_file" "$AMAN_CONFIG"
-    
-    echo -e "${GREEN}✓ PATH alias created: $alias_name -> $full_path${NC}"
+}
+
+# Create PATH alias from editor (multi-line script)
+create_path_alias_editor() {
+    local alias_name=$1
+    create_path_alias "$alias_name" "custom script" true
 }
 
 # List aliases
@@ -329,13 +387,23 @@ create_alias_interactive() {
     echo -e "\n${YELLOW}Alias type:${NC}"
     echo "  1) Shell alias (runs in current shell, can use variables/pipes)"
     echo "  2) PATH alias (creates executable script, works in all programs)"
-    read -p "Choice (1-2): " type_choice
+    echo "  3) PATH alias with editor (write a full multi-line script)"
+    read -p "Choice (1-3): " type_choice
     
+    if [ "$type_choice" = 3 ]; then
+        if ! check_conflicts "$alias_name" "path"; then
+            return 1
+        fi
+        create_path_alias "$alias_name" "" true
+        echo -e "\n${GREEN}✅ Alias created successfully!${NC}"
+        echo -e "${YELLOW}📌 The script is at ~/.aman/bin/$alias_name${NC}"
+        return
+    fi
+
     # Get command
     echo -e "\n${YELLOW}Enter the command this alias should run:${NC}"
     echo "   Example: 'kubectl' or 'docker ps --format \"table {{.Names}}\"'"
-    read -p "Command: " alias_command
-    
+    read -e -r -p "Command: " alias_command    
     if [ -z "$alias_command" ]; then
         echo -e "${RED}Command cannot be empty${NC}"
         return 1
