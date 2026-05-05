@@ -14,10 +14,10 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-AMAN_HOME="$HOME/.aman"
+AMAN_HOME="$HOME/.local/share/aman"
 AMAN_CONFIG="$AMAN_HOME/config.json"
 AMAN_ALIASES="$AMAN_HOME/aliases.sh"
-AMAN_BIN="$AMAN_HOME/bin"
+AMAN_BIN="$HOME/.local/bin"
 AMAN_BACKUPS="$AMAN_HOME/backups"
 AMAN_LOCK="$AMAN_HOME/aman.lock"
 AMAN_VERSION="1.0.1"
@@ -104,29 +104,13 @@ EOF
 EOF
     fi
     
-    # Ensure PATH includes ~/.aman/bin
+    # Source aliases.sh in rc file if not already present
     if [ -f "$RC_FILE" ]; then
-        # Check if PATH addition exists
-        if ! grep -q "export PATH=\"\$HOME/.aman/bin:\$PATH\"" "$RC_FILE" 2>/dev/null; then
-            echo "" >> "$RC_FILE"
-            echo "# Add aman bin directory to PATH" >> "$RC_FILE"
-            
-            # Different syntax for different shells
-            if [[ "$CURRENT_SHELL" == "zsh" ]]; then
-                echo "export PATH=\"\$HOME/.aman/bin:\$PATH\"" >> "$RC_FILE"
-            else
-                echo "export PATH=\"\$HOME/.aman/bin:\$PATH\"" >> "$RC_FILE"
-            fi
-            
-            echo -e "${YELLOW}📌 Added ~/.aman/bin to PATH in $RC_FILE${NC}"
-        fi
-        
-        # Source aliases.sh in rc file if not already present
-        if ! grep -q "source ~/.aman/aliases.sh" "$RC_FILE" 2>/dev/null; then
+        if ! grep -q "source ~/.local/share/aman/aliases.sh" "$RC_FILE" 2>/dev/null; then
             echo "" >> "$RC_FILE"
             echo "# Source aman aliases" >> "$RC_FILE"
-            echo "source ~/.aman/aliases.sh" >> "$RC_FILE"
-            echo -e "${YELLOW}📌 Added source for ~/.aman/aliases.sh to $RC_FILE${NC}"
+            echo "source ~/.local/share/aman/aliases.sh" >> "$RC_FILE"
+            echo -e "${YELLOW}📌 Added source for ~/.local/share/aman/aliases.sh to $RC_FILE${NC}"
         fi
     fi
 }
@@ -234,7 +218,7 @@ create_path_alias() {
 #!/bin/bash
 # aman PATH alias for: <alias_name>
 # Edit this script as needed. Save and exit to create the alias.
-# The script will be made executable and placed in ~/.aman/bin/
+# The script will be made executable and placed in ~/.local/bin/
 
 # Default: exec a command with all arguments
 # Replace this with whatever you need
@@ -396,7 +380,7 @@ create_alias_interactive() {
         fi
         create_path_alias "$alias_name" "" true
         echo -e "\n${GREEN}✅ Alias created successfully!${NC}"
-        echo -e "${YELLOW}📌 The script is at ~/.aman/bin/$alias_name${NC}"
+        echo -e "${YELLOW}📌 The script is at ~/.local/bin/$alias_name${NC}"
         return
     fi
 
@@ -630,7 +614,7 @@ ${CYAN}EXAMPLES:${NC}
 
 ${CYAN}ALIAS TYPES:${NC}
     shell    - Bash/zsh aliases (can use pipes, variables, redirections)
-    path     - Executable scripts in ~/.aman/bin (work in all programs)
+    path     - Executable scripts in ~/.local/share/aman/bin (work in all programs)
 
 ${CYAN}CONFIGURATION:${NC}
     Config:      $AMAN_CONFIG
@@ -642,7 +626,7 @@ ${CYAN}UNINSTALL:${NC}
     rm -rf ~/.aman
     # Then remove from $RC_FILE:
     #   - export PATH="\$HOME/.aman/bin:\$PATH"
-    #   - source ~/.aman/aliases.sh
+    #   - source ~/.local/share/aman/aliases.sh
 
 EOF
 }

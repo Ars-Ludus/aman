@@ -136,7 +136,7 @@ do_uninstall() {
     else
         echo ""
         echo -e "${GREEN}✅ aman has been uninstalled.${NC}"
-        echo -e "${YELLOW}Note: Your alias data at ~/.aman/ has not been removed.${NC}"
+        echo -e "${YELLOW}Note: Your alias data at ~/.local/share/aman/ has not been removed.${NC}"
     fi
 }
 

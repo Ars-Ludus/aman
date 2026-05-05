@@ -41,10 +41,12 @@ bash install.sh --uninstall
 
 ### What gets installed
 
-The `bin/aman` script is placed on your PATH. Data lives in `~/.aman/`:
+The `bin/aman` script is placed in `~/.local/bin/`. Data lives in `~/.local/share/aman/`:
 - `config.json`: Metadata and alias definitions.
 - `aliases.sh`: The generated script sourced by your shell.
-- `bin/`: Executable wrappers.
+- `backups/`: Backup copies of your aliases.
+
+PATH alias wrappers are placed directly in `~/.local/bin/` so they are immediately available.
 
 ## Usage
 
