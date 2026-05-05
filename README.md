@@ -13,9 +13,35 @@
 
 ## Installation
 
-To use `aman`, ensure the script is in your PATH. 
+### Quick install (recommended)
 
-The application data is stored in `~/.aman/`, including:
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/Ars-Ludus/aman/main/install.sh)
+```
+
+### From source
+
+```bash
+git clone https://github.com/Ars-Ludus/aman.git
+cd aman
+bash install.sh
+```
+
+Custom path:
+
+```bash
+bash install.sh ~/.local/bin
+```
+
+### Uninstall
+
+```bash
+bash install.sh --uninstall
+```
+
+### What gets installed
+
+The `bin/aman` script is placed on your PATH. Data lives in `~/.aman/`:
 - `config.json`: Metadata and alias definitions.
 - `aliases.sh`: The generated script sourced by your shell.
 - `bin/`: Executable wrappers.
